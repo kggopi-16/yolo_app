@@ -47,10 +47,6 @@ uploaded_file = st.sidebar.file_uploader(
     "Upload your YOLO .pt model", type=["pt"]
 )
 
-confidence = st.sidebar.slider(
-    "Confidence Threshold", min_value=0.1, max_value=1.0, value=0.5, step=0.05
-)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Model loading (cached so it doesn't reload on every Streamlit re-run)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,8 +67,6 @@ if uploaded_file is not None:
     try:
         model = load_model(model_tmp_path)
         st.sidebar.success("✅ Model loaded successfully!")
-        if hasattr(model, "names"):
-            st.sidebar.write("**Classes:**", ", ".join(model.names.values()))
     except Exception as e:
         st.sidebar.error(f"❌ Error loading model: {e}")
         if model_tmp_path and os.path.exists(model_tmp_path):
@@ -106,21 +100,19 @@ class VideoProcessor(VideoProcessorBase):
         self._confidence = 0.5
         self._lock = threading.Lock()
 
-    def update(self, model, confidence: float):
+    def update(self, model):
         with self._lock:
             self._model = model
-            self._confidence = confidence
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
 
         with self._lock:
             current_model = self._model
-            conf = self._confidence
 
         if current_model is not None:
             try:
-                results = current_model(img, conf=conf, verbose=False)
+                results = current_model(img, verbose=False)
                 for result in results:
                     img = result.plot()  # annotated numpy array
             except Exception:
@@ -156,7 +148,7 @@ ctx = webrtc_streamer(
 
 # Push the latest model & confidence into the running processor
 if ctx.video_processor and model is not None:
-    ctx.video_processor.update(model, confidence)
+    ctx.video_processor.update(model)
 
 st.caption(
     "📷 Click **START** above to open your webcam. "
