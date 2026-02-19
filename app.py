@@ -1,93 +1,64 @@
 import streamlit as st
 import cv2
 import tempfile
-import os
 import gc
 from ultralytics import YOLO
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 import av
-import threading
 
-# 1. Memory Management: TTL (Time To Live) removes model from RAM if unused
+# 1. Memory-Efficient Model Loading
 @st.cache_resource(ttl=600)
-def load_model(model_path):
-    model = YOLO(model_path)
-    # Enable half-precision (FP16) to save 50% RAM if hardware supports it
-    try:
-        model.to('cpu') # Ensure it's on CPU for Render
-    except:
-        pass
-    return model
+def load_yolo_model(model_path):
+    # Ensure it stays on CPU for Render
+    return YOLO(model_path)
 
-st.set_page_config(page_title="Slim YOLO Detector", layout="wide")
+st.set_page_config(page_title="YOLO Live Stream", layout="wide")
 
-# Sidebar
+# Sidebar for Model Upload
 st.sidebar.title("Settings")
 uploaded_file = st.sidebar.file_uploader("Upload .pt model", type=['pt'])
 
-model = None
+# Global model state
+if "model" not in st.session_state:
+    st.session_state.model = None
+
 if uploaded_file is not None:
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
-        tmp_file_path = tmp_file.name
+        st.session_state.model = load_yolo_model(tmp_file.name)
+    st.sidebar.success("Model Ready")
+
+# 2. Simplified Video Processing Callback
+def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
+    img = frame.to_ndarray(format="bgr24")
     
-    try:
-        model = load_model(tmp_file_path)
-        st.sidebar.success("Model Ready")
-        # Cleanup temp file path from memory
-        del tmp_file_path
-        gc.collect() 
-    except Exception as e:
-        st.sidebar.error(f"Error: {e}")
+    # Only run inference if model is loaded
+    if st.session_state.model is not None:
+        # imgsz=320 is critical for Render's low RAM
+        results = st.session_state.model(img, conf=0.25, imgsz=320, verbose=False)
+        for result in results:
+            img = result.plot()
+        del results # Manual cleanup to free RAM
+    
+    return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-class VideoProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.model = None
-        self.lock = threading.Lock()
-
-    def update_model(self, model):
-        with self.lock:
-            self.model = model
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
-        
-        with self.lock:
-            if self.model is not None:
-                # OPTIMIZATION: imgsz=320 reduces RAM usage significantly during math
-                results = self.model(img, conf=0.25, imgsz=320, verbose=False)
-                for result in results:
-                    img = result.plot()
-                
-                # Cleanup frame-specific objects
-                del results
-        
-        # Periodic garbage collection
-        if threading.active_count() < 5: # Avoid spamming GC
-             gc.collect()
-             
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-rtc_config = RTCConfiguration(
+# 3. Robust RTC Config for Cloud (Render/Streamlit Cloud)
+RTC_CONFIG = RTCConfiguration(
     {"iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
-        {
-            "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
-            "username": "openrelayproject",
-            "credential": "openrelayproject"
-        }
+        {"urls": ["stun:stun1.l.google.com:19302"]}
     ]}
 )
 
-st.title("Low-RAM Object Detection")
+st.title("Live YOLO Object Detection")
 
-ctx = webrtc_streamer(
-    key="yolo-slim-v1", 
-    video_processor_factory=VideoProcessor,
-    rtc_configuration=rtc_config,
+if st.session_state.model is None:
+    st.warning("Please upload a YOLO .pt model in the sidebar to start detection.")
+
+webrtc_streamer(
+    key="yolo-detection",
+    video_frame_callback=video_frame_callback,
+    rtc_configuration=RTC_CONFIG,
     media_stream_constraints={"video": True, "audio": False},
-    async_processing=True
+    async_processing=True,
 )
-
-if ctx.video_processor:
-    ctx.video_processor.update_model(model)
