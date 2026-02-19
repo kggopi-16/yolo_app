@@ -90,40 +90,32 @@ if uploaded_file is None:
     st.stop()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WebRTC Video Processor
+# WebRTC Video Processor – model injected via factory closure
 # ─────────────────────────────────────────────────────────────────────────────
-class VideoProcessor(VideoProcessorBase):
-    """Thread-safe video processor that runs YOLO inference on each frame."""
+def make_video_processor(yolo_model):
+    """Return a VideoProcessorBase subclass with the YOLO model baked in."""
 
-    def __init__(self):
-        self._model = None
-        self._confidence = 0.5
-        self._lock = threading.Lock()
+    class VideoProcessor(VideoProcessorBase):
+        def __init__(self):
+            # Model is captured from the outer closure — available immediately
+            # in the very first recv() call, no update() needed.
+            self._model = yolo_model
 
-    def update(self, model):
-        with self._lock:
-            self._model = model
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
-
-        with self._lock:
-            current_model = self._model
-
-        if current_model is not None:
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img = frame.to_ndarray(format="bgr24")
             try:
-                results = current_model(img, verbose=False)
+                results = self._model(img, verbose=False)
                 for result in results:
-                    img = result.plot()  # annotated numpy array
+                    img = result.plot()
             except Exception:
                 pass  # silently skip a bad frame
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+    return VideoProcessor
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ICE / STUN configuration for Streamlit Cloud
-# Using multiple public STUN servers for reliability
 # ─────────────────────────────────────────────────────────────────────────────
 rtc_configuration = RTCConfiguration(
     {
@@ -138,17 +130,13 @@ rtc_configuration = RTCConfiguration(
     }
 )
 
-ctx = webrtc_streamer(
+webrtc_streamer(
     key="yolo-object-detection",
-    video_processor_factory=VideoProcessor,
+    video_processor_factory=make_video_processor(model),
     rtc_configuration=rtc_configuration,
     media_stream_constraints={"video": True, "audio": False},
-    async_processing=True,   # non-blocking processing for better performance
+    async_processing=True,
 )
-
-# Push the latest model & confidence into the running processor
-if ctx.video_processor and model is not None:
-    ctx.video_processor.update(model)
 
 st.caption(
     "📷 Click **START** above to open your webcam. "
